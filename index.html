@@ -23,11 +23,39 @@ const W = cv.width, H = cv.height;
 let best = 0;
 try { best = +localStorage.getItem('starhopper_best') || 0; } catch (e) {}
 
-let bonusTotal = 0, player, platforms, stars, comets, camY, state, keys = {}, targetX = null, t = 0, bg;
+let bonusTotal = 0, player, platforms, stars, comets, items, parts, camY, state = 'title', keys = {}, targetX = null, t = 0, bg, muted = false, shake = 0;
+
+// ---- tiny WebAudio sfx (no files needed) ----
+let ac = null;
+function beep(freq, dur = .1, type = 'square', vol = .06, slide = 0) {
+  if (muted) return;
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = freq;
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), ac.currentTime + dur);
+    g.gain.value = vol; g.gain.exponentialRampToValueAtTime(.0001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + dur);
+  } catch (e) {}
+}
+const sfx = {
+  bounce: () => beep(320, .09, 'sine', .07, 220),
+  star: () => { beep(880, .08, 'triangle', .08); setTimeout(() => beep(1320, .12, 'triangle', .08), 60); },
+  power: () => { beep(440, .1, 'sawtooth', .05, 440); setTimeout(() => beep(880, .15, 'sawtooth', .05, 400), 90); },
+  shield: () => beep(200, .2, 'square', .08, -120),
+  die: () => beep(300, .6, 'sawtooth', .09, -260),
+};
+
+function burst(x, y, color, n = 10, speed = 3) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, v = Math.random() * speed + .5;
+    parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 30 + Math.random() * 20, color });
+  }
+}
 
 function reset() {
-  player = { x: W / 2, y: H - 120, vx: 0, vy: -11, r: 14 };
-  platforms = []; stars = []; comets = [];
+  player = { x: W / 2, y: H - 120, vx: 0, vy: -11, r: 14, shield: false, rocket: 0 };
+  platforms = []; stars = []; comets = []; items = []; parts = []; shake = 0;
   camY = 0; bonusTotal = 0; state = 'play';
   platforms.push({ x: W / 2 - 40, y: H - 80, w: 80, kind: 'solid' });
   let y = H - 160;
@@ -42,24 +70,31 @@ function spawnRow(y) {
   const kind = r < .15 ? 'crumble' : r < .3 ? 'moving' : 'solid';
   platforms.push({ x, y, w, kind, dir: Math.random() < .5 ? 1 : -1, gone: false });
   if (Math.random() < .55) stars.push({ x: x + w / 2, y: y - 30, got: false });
+  if (Math.random() < .07) items.push({ x: x + w / 2, y: y - 34, kind: Math.random() < .5 ? 'shield' : 'rocket', got: false });
   if (Math.random() < .18 && y < H - 400 - camY * 0) comets.push({ x: Math.random() * W, y: y - 40, vx: (Math.random() - .5) * 2.4 });
 }
 
-function jump() {}
-
-addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') { e.preventDefault(); state === 'over' ? reset() : jump(); } });
-addEventListener('keyup', e => keys[e.key] = false);
+function startOrRestart() { if (state === 'title' || state === 'over') reset(); }
+addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys[k] = true;
+  if (k === ' ' || k === 'Enter') { e.preventDefault(); startOrRestart(); }
+  if (k === 'm') muted = !muted;
+  if (k === 'p' && (state === 'play' || state === 'pause')) state = state === 'play' ? 'pause' : 'play';
+});
+addEventListener('keyup', e => keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false);
 function pointer(e) {
   const rect = cv.getBoundingClientRect();
   const p = e.touches ? e.touches[0] : e;
   targetX = (p.clientX - rect.left) / rect.width * W;
 }
-cv.addEventListener('pointerdown', e => { if (state === 'over') { reset(); return; } pointer(e); jump(); });
+cv.addEventListener('pointerdown', e => { if (state !== 'play') { startOrRestart(); return; } pointer(e); });
 cv.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') pointer(e); });
 cv.addEventListener('pointerup', () => targetX = null);
 
 function update() {
   t++;
+  if (shake > 0 && state !== 'play') shake--;
   if (state !== 'play') return;
   const accel = .6;
   if (keys.ArrowLeft || keys.a) player.vx -= accel;
@@ -70,7 +105,8 @@ function update() {
   if (player.x < -10) player.x = W + 10;
   if (player.x > W + 10) player.x = -10;
 
-  player.vy += .45;
+  if (player.rocket > 0) { player.rocket--; player.vy = -13; if (t % 2 === 0) burst(player.x, player.y + 14, '#ffb04a', 2, 1.5); }
+  else player.vy += .45;
   player.y += player.vy;
   player.onGround = false;
 
@@ -79,7 +115,7 @@ function update() {
       if (p.gone) continue;
       if (player.x > p.x - 6 && player.x < p.x + p.w + 6 &&
           player.y + player.r > p.y && player.y + player.r < p.y + 16 + player.vy) {
-        player.vy = -12.5; player.onGround = true;
+        player.vy = -12.5; player.onGround = true; sfx.bounce(); burst(player.x, p.y, '#7dff9a', 6, 2);
         if (p.kind === 'crumble') p.gone = true;
         break;
       }
@@ -87,11 +123,22 @@ function update() {
   }
   for (const p of platforms) if (p.kind === 'moving') { p.x += p.dir * 1.2; if (p.x < 0 || p.x + p.w > W) p.dir *= -1; }
 
-  for (const s of stars) if (!s.got && Math.hypot(s.x - player.x, s.y - player.y) < 24) { s.got = true; bonusTotal += 25; }
+  for (const s of stars) if (!s.got && Math.hypot(s.x - player.x, s.y - player.y) < 24) { s.got = true; bonusTotal += 25; sfx.star(); burst(s.x, s.y, '#ffd36b', 12, 3); }
   for (const c of comets) {
     c.x += c.vx; if (c.x < 0 || c.x > W) c.vx *= -1;
-    if (Math.hypot(c.x - player.x, c.y - player.y) < 22) { state = 'over'; }
+    if (!c.dead && Math.hypot(c.x - player.x, c.y - player.y) < 22) {
+      if (player.shield || player.rocket > 0) {
+        c.dead = true; player.shield = false; bonusTotal += 40; sfx.shield(); shake = 10; burst(c.x, c.y, '#ff5a7a', 20, 4);
+      } else { state = 'over'; sfx.die(); shake = 16; burst(player.x, player.y, '#b9a6ff', 30, 5); }
+    }
   }
+  for (const it of items) if (!it.got && Math.hypot(it.x - player.x, it.y - player.y) < 24) {
+    it.got = true; sfx.power(); burst(it.x, it.y, '#6be3ff', 14, 3);
+    if (it.kind === 'shield') player.shield = true; else player.rocket = 110;
+  }
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.vy += .08; p.life--; }
+  parts = parts.filter(p => p.life > 0);
+  if (shake > 0) shake--;
 
   if (player.y < camY + H * .4) camY = player.y - H * .4;
   const height = Math.floor(-camY / 10);
@@ -101,9 +148,10 @@ function update() {
   let topY = Math.min(...platforms.map(p => p.y));
   while (topY > camY - 120) { topY -= 70 - Math.min(20, height / 80); spawnRow(topY); }
   stars = stars.filter(s => s.y < camY + H + 60);
-  comets = comets.filter(c => c.y < camY + H + 60);
+  comets = comets.filter(c => !c.dead && c.y < camY + H + 60);
+  items = items.filter(i => !i.got && i.y < camY + H + 60);
 
-  if (player.y - camY > H + 60) state = 'over';
+  if (state === 'play' && player.y - camY > H + 60) { state = 'over'; sfx.die(); }
   if (state === 'over') {
     const total = height + bonusTotal;
     if (total > best) { best = total; try { localStorage.setItem('starhopper_best', best); } catch (e) {} }
@@ -118,7 +166,7 @@ function draw() {
     ctx.fillStyle = '#fff'; ctx.fillRect(b.x, y, b.s, b.s);
   }
   ctx.globalAlpha = 1;
-  ctx.save(); ctx.translate(0, -camY);
+  ctx.save(); ctx.translate(shake ? (Math.random() - .5) * shake : 0, -camY + (shake ? (Math.random() - .5) * shake : 0));
 
   for (const p of platforms) {
     if (p.gone) continue;
@@ -131,6 +179,18 @@ function draw() {
     ctx.fillStyle = '#ffd36b'; ctx.shadowColor = '#ffd36b'; ctx.shadowBlur = 14;
     star(s.x, s.y, 10, 4.5, 5, t / 30);
   }
+  for (const it of items) {
+    const bob = Math.sin(t / 12) * 3;
+    ctx.shadowBlur = 16;
+    if (it.kind === 'shield') {
+      ctx.strokeStyle = '#6be3ff'; ctx.shadowColor = '#6be3ff'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(it.x, it.y + bob, 10, 0, 7); ctx.stroke();
+    } else {
+      ctx.fillStyle = '#ffb04a'; ctx.shadowColor = '#ffb04a';
+      ctx.beginPath(); ctx.moveTo(it.x, it.y + bob - 12); ctx.lineTo(it.x + 8, it.y + bob + 8); ctx.lineTo(it.x - 8, it.y + bob + 8); ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.shadowBlur = 0;
   for (const c of comets) {
     ctx.shadowColor = '#ff5a7a'; ctx.shadowBlur = 18; ctx.fillStyle = '#ff5a7a';
     ctx.beginPath(); ctx.arc(c.x, c.y, 11, 0, 7); ctx.fill();
@@ -144,12 +204,35 @@ function draw() {
   ctx.shadowBlur = 0; ctx.fillStyle = '#0b0d1a';
   ctx.beginPath(); ctx.arc(player.x - 5, player.y - 3, 3, 0, 7); ctx.arc(player.x + 5, player.y - 3, 3, 0, 7); ctx.fill();
   ctx.fillRect(player.x - 5, player.y + 4, 10, 2);
+  if (player.shield) { ctx.strokeStyle = '#6be3ffcc'; ctx.lineWidth = 3; ctx.shadowColor = '#6be3ff'; ctx.shadowBlur = 14; ctx.beginPath(); ctx.arc(player.x, player.y, player.r + 7, 0, 7); ctx.stroke(); ctx.shadowBlur = 0; }
+  for (const p of parts) { ctx.globalAlpha = Math.max(0, p.life / 40); ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  ctx.globalAlpha = 1;
   ctx.restore();
 
   const height = Math.max(0, Math.floor(-camY / 10));
   ctx.fillStyle = '#e8eaff'; ctx.font = 'bold 18px system-ui';
   ctx.fillText(`Score ${height + bonusTotal}`, 14, 28);
   ctx.textAlign = 'right'; ctx.fillText(`Best ${best}`, W - 14, 28); ctx.textAlign = 'left';
+  ctx.font = '13px system-ui';
+  if (state !== 'title') {
+    if (player.shield) { ctx.fillStyle = '#6be3ff'; ctx.fillText('SHIELD', 14, 48); }
+    if (player.rocket > 0) { ctx.fillStyle = '#ffb04a'; ctx.fillText(`ROCKET ${(player.rocket / 60).toFixed(1)}s`, player.shield ? 74 : 14, 48); }
+  }
+  ctx.fillStyle = '#e8eaff88'; ctx.textAlign = 'right'; ctx.fillText(muted ? 'M: sound off' : 'M: mute · P: pause', W - 14, 48); ctx.textAlign = 'left';
+
+  if (state === 'title' || state === 'pause') {
+    ctx.fillStyle = '#0b0d1acc'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd36b'; ctx.font = 'bold 40px system-ui';
+    ctx.fillText(state === 'pause' ? 'Paused' : 'STAR HOPPER', W / 2, H / 2 - 70);
+    ctx.fillStyle = '#e8eaff'; ctx.font = '16px system-ui';
+    const lines = state === 'pause' ? ['Press P to resume'] : [
+      'Bounce up through the stars.',
+      '', '★ Star = +25', 'Blue ring = shield (survives a comet)', 'Orange triangle = rocket boost', 'Red comets = bad news', '',
+      'Tap or press Space to start'];
+    lines.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 - 30 + i * 24));
+    ctx.textAlign = 'left';
+  }
 
   if (state === 'over') {
     ctx.fillStyle = '#0b0d1acc'; ctx.fillRect(0, 0, W, H);
@@ -171,7 +254,7 @@ function star(x, y, R, r, n, rot) {
 }
 
 function loop() { update(); draw(); requestAnimationFrame(loop); }
-reset(); loop();
+reset(); state = 'title'; loop();
 </script>
 </body>
 </html>
