@@ -23,12 +23,14 @@ const W = cv.width, H = cv.height;
 let best = 0;
 try { best = +localStorage.getItem('starhopper_best') || 0; } catch (e) {}
 
+const ACCEL = .6, DAMP = .88, GRAV = .45, BOUNCE = -12.5, ROCKET_VY = -13;
+const bot = { bestCam: 0, progressAt: 0, exploreUntil: 0, hold: null, holdLeft: 0, on: false, speed: 1, runs: 0, last: 0, best: 0, waiting: false, restartIn: 0 };
 let bonusTotal = 0, player, platforms, stars, comets, items, parts, camY, state = 'title', keys = {}, targetX = null, t = 0, bg, muted = false, shake = 0;
 
 // ---- tiny WebAudio sfx (no files needed) ----
 let ac = null;
 function beep(freq, dur = .1, type = 'square', vol = .06, slide = 0) {
-  if (muted) return;
+  if (muted || (bot.on && bot.speed > 1)) return;
   try {
     ac = ac || new (window.AudioContext || window.webkitAudioContext)();
     const o = ac.createOscillator(), g = ac.createGain();
@@ -56,7 +58,7 @@ function burst(x, y, color, n = 10, speed = 3) {
 function reset() {
   player = { x: W / 2, y: H - 120, vx: 0, vy: -11, r: 14, shield: false, rocket: 0 };
   platforms = []; stars = []; comets = []; items = []; parts = []; shake = 0;
-  camY = 0; bonusTotal = 0; state = 'play';
+  camY = 0; bonusTotal = 0; state = 'play'; bot.bestCam = 0; bot.progressAt = t; bot.exploreUntil = 0; bot.hold = null;
   platforms.push({ x: W / 2 - 40, y: H - 80, w: 80, kind: 'solid' });
   let y = H - 160;
   while (y > -H) { spawnRow(y); y -= 70; }
@@ -80,6 +82,8 @@ addEventListener('keydown', e => {
   keys[k] = true;
   if (k === ' ' || k === 'Enter') { e.preventDefault(); startOrRestart(); }
   if (k === 'm') muted = !muted;
+  if (k === 'b') { bot.on = !bot.on; bot.waiting = false; bot.speed = 1; if (bot.on && (state === 'title' || state === 'over')) reset(); }
+  if (bot.on && (k === '1' || k === '2' || k === '3')) bot.speed = [1, 4, 16][+k - 1];
   if (k === 'p' && (state === 'play' || state === 'pause')) state = state === 'play' ? 'pause' : 'play';
 });
 addEventListener('keyup', e => keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false);
@@ -92,21 +96,119 @@ cv.addEventListener('pointerdown', e => { if (state !== 'play') { startOrRestart
 cv.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') pointer(e); });
 cv.addEventListener('pointerup', () => targetX = null);
 
+// ---------------- BOT ----------------
+// Every frame: simulate ~27 candidate steering plans [dir, switchAfterFrames, dir2] with the
+// game's own physics (platforms, moving + crumbling platforms, comets, pickups), then take the
+// first move of the best plan. If it makes no upward progress for ~6s it makes a few random
+// (but verified-safe) moves to shake loose.
+const BOT_PLANS = (() => {
+  const plans = [[0, 999, 0], [-1, 999, -1], [1, 999, 1]];
+  for (const a of [-1, 0, 1]) for (const b of [-1, 0, 1]) if (a !== b) for (const k of [6, 14, 28, 50]) plans.push([a, k, b]);
+  return plans;
+})();
+
+function botSim(a, k1, b) {
+  let x = player.x, y = player.y, vx = player.vx, vy = player.vy;
+  let shield = player.shield, rocket = player.rocket, cam = camY;
+  const lo = y - 460, hi = y + 260;
+  const pl = [];
+  for (const p of platforms) if (p.y > lo && p.y < hi && !p.gone) pl.push({ x: p.x, y: p.y, w: p.w, kind: p.kind, dir: p.dir, gone: false });
+  const cs = [];
+  for (const c of comets) if (!c.dead && c.y > lo && c.y < hi) cs.push({ x: c.x, y: c.y, vx: c.vx });
+  const st = [];
+  for (const s of stars) if (!s.got && s.y > lo && s.y < hi) st.push(s);
+  const it = [];
+  for (const i of items) if (!i.got && i.y > lo && i.y < hi) it.push(i);
+  const stGot = new Array(st.length).fill(false), itGot = new Array(it.length).fill(false);
+  let top = y, bounces = 0, bonus = 0;
+  for (let f = 0; f < 170; f++) {
+    vx = (vx + (f < k1 ? a : b) * ACCEL) * DAMP;
+    x += vx; if (x < -10) x = W + 10; if (x > W + 10) x = -10;
+    if (rocket > 0) { rocket--; vy = ROCKET_VY; } else vy += GRAV;
+    y += vy;
+    if (vy > 0) {
+      for (const p of pl) {
+        if (p.gone) continue;
+        if (x > p.x - 6 && x < p.x + p.w + 6 && y + 14 > p.y && y + 14 < p.y + 16 + vy) {
+          vy = BOUNCE; bounces++;
+          if (p.kind === 'crumble') { p.gone = true; bonus -= 12; }
+          break;
+        }
+      }
+    }
+    for (const p of pl) if (p.kind === 'moving') { p.x += p.dir * 1.2; if (p.x < 0 || p.x + p.w > W) p.dir *= -1; }
+    for (let i = 0; i < st.length; i++) if (!stGot[i] && Math.hypot(st[i].x - x, st[i].y - y) < 24) { stGot[i] = true; bonus += 30; }
+    for (let i = 0; i < it.length; i++) if (!itGot[i] && Math.hypot(it[i].x - x, it[i].y - y) < 24) {
+      itGot[i] = true;
+      // A rocket flies ~1400px blind and can end beside an unseen comet, so only take one while holding a shield (it absorbs that hit).
+      if (it[i].kind === 'shield') { shield = true; bonus += 60; } else if (shield) { rocket = 110; bonus += 80; } else return -1e5 + f;
+    }
+    for (const c of cs) {
+      if (c.dead) continue;
+      c.x += c.vx; if (c.x < 0 || c.x > W) c.vx *= -1;
+      if (Math.hypot(c.x - x, c.y - y) < 26) {
+        if (shield || rocket > 0) { c.dead = true; if (rocket <= 0) { shield = false; bonus -= 40; } else bonus += 40; }
+        else return -1e6 + f;
+      }
+    }
+    if (y < top) top = y;
+    if (y < cam + H * .4) cam = y - H * .4;
+    if (y - cam > H + 60) return -1e6 + f;
+    if (bounces >= 2 && vy < 0) break;
+  }
+  return -top + bonus + (bounces ? 0 : -300);
+}
+
+function botDecide() {
+  // stuck-breaker bookkeeping
+  if (camY < bot.bestCam - 1) { bot.bestCam = camY; bot.progressAt = t; }
+  if (!bot.exploreUntil && t - bot.progressAt > 360) { bot.exploreUntil = t + 180; bot.hold = null; }
+  if (bot.exploreUntil && t >= bot.exploreUntil) { bot.exploreUntil = 0; bot.progressAt = t; }
+
+  if (bot.exploreUntil) {
+    if (bot.hold) { bot.holdLeft--; if (bot.holdLeft <= 0 || botSim(...bot.hold) < -1e5) bot.hold = null; }
+    if (!bot.hold) {
+      const ok = BOT_PLANS.filter(p => botSim(p[0], p[1], p[2]) > -1e5);
+      const pool = ok.length ? ok : BOT_PLANS;
+      bot.hold = pool[(Math.random() * pool.length) | 0].slice();
+      bot.holdLeft = 20 + ((Math.random() * 30) | 0);
+    }
+    const dir = bot.hold[0];
+    bot.hold[1]--; if (bot.hold[1] <= 0) bot.hold = [bot.hold[2], 999, bot.hold[2]];
+    return dir;
+  }
+
+  let best = -Infinity, dir = 0;
+  for (const [a, k, b] of BOT_PLANS) {
+    const sc = botSim(a, k, b) - (a !== 0 ? .5 : 0);
+    if (sc > best) { best = sc; dir = a; }
+  }
+  return dir;
+}
+
+function finalScore() { return Math.max(0, Math.floor(-camY / 10)) + bonusTotal; }
+
 function update() {
   t++;
+  if (state === 'over' && bot.on) {
+    if (!bot.waiting) { bot.waiting = true; bot.restartIn = 60; bot.runs++; bot.last = finalScore(); bot.best = Math.max(bot.best, bot.last); }
+    else if (--bot.restartIn <= 0) { bot.waiting = false; reset(); }
+  }
   if (shake > 0 && state !== 'play') shake--;
   if (state !== 'play') return;
-  const accel = .6;
-  if (keys.ArrowLeft || keys.a) player.vx -= accel;
-  if (keys.ArrowRight || keys.d) player.vx += accel;
-  if (targetX !== null) player.vx += Math.sign(targetX - player.x) * Math.min(accel, Math.abs(targetX - player.x) / 20);
-  player.vx *= .88;
+  if (bot.on) player.vx += botDecide() * ACCEL;
+  else {
+    if (keys.ArrowLeft || keys.a) player.vx -= ACCEL;
+    if (keys.ArrowRight || keys.d) player.vx += ACCEL;
+    if (targetX !== null) player.vx += Math.sign(targetX - player.x) * Math.min(ACCEL, Math.abs(targetX - player.x) / 20);
+  }
+  player.vx *= DAMP;
   player.x += player.vx;
   if (player.x < -10) player.x = W + 10;
   if (player.x > W + 10) player.x = -10;
 
-  if (player.rocket > 0) { player.rocket--; player.vy = -13; if (t % 2 === 0) burst(player.x, player.y + 14, '#ffb04a', 2, 1.5); }
-  else player.vy += .45;
+  if (player.rocket > 0) { player.rocket--; player.vy = ROCKET_VY; if (t % 2 === 0) burst(player.x, player.y + 14, '#ffb04a', 2, 1.5); }
+  else player.vy += GRAV;
   player.y += player.vy;
   player.onGround = false;
 
@@ -115,7 +217,7 @@ function update() {
       if (p.gone) continue;
       if (player.x > p.x - 6 && player.x < p.x + p.w + 6 &&
           player.y + player.r > p.y && player.y + player.r < p.y + 16 + player.vy) {
-        player.vy = -12.5; player.onGround = true; sfx.bounce(); burst(player.x, p.y, '#7dff9a', 6, 2);
+        player.vy = BOUNCE; player.onGround = true; sfx.bounce(); burst(player.x, p.y, '#7dff9a', 6, 2);
         if (p.kind === 'crumble') p.gone = true;
         break;
       }
@@ -154,7 +256,7 @@ function update() {
   if (state === 'play' && player.y - camY > H + 60) { state = 'over'; sfx.die(); }
   if (state === 'over') {
     const total = height + bonusTotal;
-    if (total > best) { best = total; try { localStorage.setItem('starhopper_best', best); } catch (e) {} }
+    if (!bot.on && total > best) { best = total; try { localStorage.setItem('starhopper_best', best); } catch (e) {} }
   }
 }
 
@@ -218,7 +320,11 @@ function draw() {
     if (player.shield) { ctx.fillStyle = '#6be3ff'; ctx.fillText('SHIELD', 14, 48); }
     if (player.rocket > 0) { ctx.fillStyle = '#ffb04a'; ctx.fillText(`ROCKET ${(player.rocket / 60).toFixed(1)}s`, player.shield ? 74 : 14, 48); }
   }
-  ctx.fillStyle = '#e8eaff88'; ctx.textAlign = 'right'; ctx.fillText(muted ? 'M: sound off' : 'M: mute · P: pause', W - 14, 48); ctx.textAlign = 'left';
+  ctx.fillStyle = '#e8eaff88'; ctx.textAlign = 'right'; ctx.fillText(muted ? 'M: sound off' : 'M: mute · P: pause · B: bot', W - 14, 48); ctx.textAlign = 'left';
+  if (bot.on) {
+    ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 13px system-ui';
+    ctx.fillText(`BOT  x${bot.speed}  (1/2/3 = speed)  runs ${bot.runs}  last ${bot.last}  best ${bot.best}`, 14, H - 14);
+  }
 
   if (state === 'title' || state === 'pause') {
     ctx.fillStyle = '#0b0d1acc'; ctx.fillRect(0, 0, W, H);
@@ -229,7 +335,7 @@ function draw() {
     const lines = state === 'pause' ? ['Press P to resume'] : [
       'Bounce up through the stars.',
       '', '★ Star = +25', 'Blue ring = shield (survives a comet)', 'Orange triangle = rocket boost', 'Red comets = bad news', '',
-      'Tap or press Space to start'];
+      'Tap or press Space to start', 'Press B to watch the bot play'];
     lines.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 - 30 + i * 24));
     ctx.textAlign = 'left';
   }
@@ -253,7 +359,7 @@ function star(x, y, R, r, n, rot) {
   ctx.closePath(); ctx.fill();
 }
 
-function loop() { update(); draw(); requestAnimationFrame(loop); }
+function loop() { const n = bot.on ? bot.speed : 1; for (let i = 0; i < n; i++) update(); draw(); requestAnimationFrame(loop); }
 reset(); state = 'title'; loop();
 </script>
 </body>
