@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Hopper</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0d1a; color: #e8eaff; font-family: system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: 2px; color: #ffd36b; }
+  canvas { background: linear-gradient(#10143a, #1b1050 70%, #301560); border-radius: 12px; max-width: 96vw; touch-action: none; box-shadow: 0 0 40px #5b3fff55; }
+  p { margin: 0; font-size: 13px; opacity: .75; }
+</style>
+</head>
+<body>
+<h1>★ STAR HOPPER ★</h1>
+<canvas id="c" width="420" height="640"></canvas>
+<p>You bounce automatically. ← → / A D or drag to steer. Grab stars (+25), dodge comets, don't fall!</p>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+let best = 0;
+try { best = +localStorage.getItem('starhopper_best') || 0; } catch (e) {}
+
+let bonusTotal = 0, player, platforms, stars, comets, camY, state, keys = {}, targetX = null, t = 0, bg;
+
+function reset() {
+  player = { x: W / 2, y: H - 120, vx: 0, vy: -11, r: 14 };
+  platforms = []; stars = []; comets = [];
+  camY = 0; bonusTotal = 0; state = 'play';
+  platforms.push({ x: W / 2 - 40, y: H - 80, w: 80, kind: 'solid' });
+  let y = H - 160;
+  while (y > -H) { spawnRow(y); y -= 70; }
+  bg = Array.from({ length: 60 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 1.8 + .4 }));
+}
+
+function spawnRow(y) {
+  const w = 60 + Math.random() * 30;
+  const x = Math.random() * (W - w);
+  const r = Math.random();
+  const kind = r < .15 ? 'crumble' : r < .3 ? 'moving' : 'solid';
+  platforms.push({ x, y, w, kind, dir: Math.random() < .5 ? 1 : -1, gone: false });
+  if (Math.random() < .55) stars.push({ x: x + w / 2, y: y - 30, got: false });
+  if (Math.random() < .18 && y < H - 400 - camY * 0) comets.push({ x: Math.random() * W, y: y - 40, vx: (Math.random() - .5) * 2.4 });
+}
+
+function jump() {}
+
+addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') { e.preventDefault(); state === 'over' ? reset() : jump(); } });
+addEventListener('keyup', e => keys[e.key] = false);
+function pointer(e) {
+  const rect = cv.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  targetX = (p.clientX - rect.left) / rect.width * W;
+}
+cv.addEventListener('pointerdown', e => { if (state === 'over') { reset(); return; } pointer(e); jump(); });
+cv.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') pointer(e); });
+cv.addEventListener('pointerup', () => targetX = null);
+
+function update() {
+  t++;
+  if (state !== 'play') return;
+  const accel = .6;
+  if (keys.ArrowLeft || keys.a) player.vx -= accel;
+  if (keys.ArrowRight || keys.d) player.vx += accel;
+  if (targetX !== null) player.vx += Math.sign(targetX - player.x) * Math.min(accel, Math.abs(targetX - player.x) / 20);
+  player.vx *= .88;
+  player.x += player.vx;
+  if (player.x < -10) player.x = W + 10;
+  if (player.x > W + 10) player.x = -10;
+
+  player.vy += .45;
+  player.y += player.vy;
+  player.onGround = false;
+
+  if (player.vy > 0) {
+    for (const p of platforms) {
+      if (p.gone) continue;
+      if (player.x > p.x - 6 && player.x < p.x + p.w + 6 &&
+          player.y + player.r > p.y && player.y + player.r < p.y + 16 + player.vy) {
+        player.vy = -12.5; player.onGround = true;
+        if (p.kind === 'crumble') p.gone = true;
+        break;
+      }
+    }
+  }
+  for (const p of platforms) if (p.kind === 'moving') { p.x += p.dir * 1.2; if (p.x < 0 || p.x + p.w > W) p.dir *= -1; }
+
+  for (const s of stars) if (!s.got && Math.hypot(s.x - player.x, s.y - player.y) < 24) { s.got = true; bonusTotal += 25; }
+  for (const c of comets) {
+    c.x += c.vx; if (c.x < 0 || c.x > W) c.vx *= -1;
+    if (Math.hypot(c.x - player.x, c.y - player.y) < 22) { state = 'over'; }
+  }
+
+  if (player.y < camY + H * .4) camY = player.y - H * .4;
+  const height = Math.floor(-camY / 10);
+  player.height = height;
+
+  while (platforms.length && platforms[0].y > camY + H + 60) platforms.shift();
+  let topY = Math.min(...platforms.map(p => p.y));
+  while (topY > camY - 120) { topY -= 70 - Math.min(20, height / 80); spawnRow(topY); }
+  stars = stars.filter(s => s.y < camY + H + 60);
+  comets = comets.filter(c => c.y < camY + H + 60);
+
+  if (player.y - camY > H + 60) state = 'over';
+  if (state === 'over') {
+    const total = height + bonusTotal;
+    if (total > best) { best = total; try { localStorage.setItem('starhopper_best', best); } catch (e) {} }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (const b of bg) {
+    const y = ((b.y - camY * b.s * .15) % H + H) % H;
+    ctx.globalAlpha = .4 + .6 * Math.abs(Math.sin(t / 40 + b.x));
+    ctx.fillStyle = '#fff'; ctx.fillRect(b.x, y, b.s, b.s);
+  }
+  ctx.globalAlpha = 1;
+  ctx.save(); ctx.translate(0, -camY);
+
+  for (const p of platforms) {
+    if (p.gone) continue;
+    ctx.fillStyle = p.kind === 'crumble' ? '#c98a5a' : p.kind === 'moving' ? '#6be3ff' : '#7dff9a';
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.roundRect(p.x, p.y, p.w, 10, 5); ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+  for (const s of stars) if (!s.got) {
+    ctx.fillStyle = '#ffd36b'; ctx.shadowColor = '#ffd36b'; ctx.shadowBlur = 14;
+    star(s.x, s.y, 10, 4.5, 5, t / 30);
+  }
+  for (const c of comets) {
+    ctx.shadowColor = '#ff5a7a'; ctx.shadowBlur = 18; ctx.fillStyle = '#ff5a7a';
+    ctx.beginPath(); ctx.arc(c.x, c.y, 11, 0, 7); ctx.fill();
+    ctx.globalAlpha = .35; ctx.beginPath(); ctx.moveTo(c.x - 9, c.y); ctx.lineTo(c.x - c.vx * 14, c.y - 28); ctx.lineTo(c.x + 9, c.y); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  ctx.shadowBlur = 0;
+  // player: little rocket-frog
+  ctx.fillStyle = '#b9a6ff'; ctx.shadowColor = '#b9a6ff'; ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, 7); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = '#0b0d1a';
+  ctx.beginPath(); ctx.arc(player.x - 5, player.y - 3, 3, 0, 7); ctx.arc(player.x + 5, player.y - 3, 3, 0, 7); ctx.fill();
+  ctx.fillRect(player.x - 5, player.y + 4, 10, 2);
+  ctx.restore();
+
+  const height = Math.max(0, Math.floor(-camY / 10));
+  ctx.fillStyle = '#e8eaff'; ctx.font = 'bold 18px system-ui';
+  ctx.fillText(`Score ${height + bonusTotal}`, 14, 28);
+  ctx.textAlign = 'right'; ctx.fillText(`Best ${best}`, W - 14, 28); ctx.textAlign = 'left';
+
+  if (state === 'over') {
+    ctx.fillStyle = '#0b0d1acc'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd36b'; ctx.font = 'bold 34px system-ui'; ctx.fillText('Lost in space!', W / 2, H / 2 - 20);
+    ctx.fillStyle = '#e8eaff'; ctx.font = '20px system-ui';
+    ctx.fillText(`Final score ${height + bonusTotal}`, W / 2, H / 2 + 16);
+    ctx.font = '15px system-ui'; ctx.fillText('Tap or press Space to try again', W / 2, H / 2 + 50);
+    ctx.textAlign = 'left';
+  }
+}
+function star(x, y, R, r, n, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < n * 2; i++) {
+    const a = rot + i * Math.PI / n, rad = i % 2 ? r : R;
+    ctx.lineTo(x + Math.cos(a) * rad, y + Math.sin(a) * rad);
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+reset(); loop();
+</script>
+</body>
+</html>
