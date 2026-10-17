@@ -11,7 +11,7 @@ Play it: open `index.html`, or enable GitHub Pages (Settings → Pages → Deplo
 
 ## The bot
 
-Press **B** to hand the controls to an autopilot, and **1 / 2 / 3** to run it at 1×, 4× or 16× speed. Its runs never touch your saved best.
+Tap the **🤖 开启 BOT 自动玩** button under the game (or press **B**) to hand the controls to an autopilot, then use the **1× / 4× / 16×** buttons (or keys **1 / 2 / 3**) for speed. Its runs never touch your saved best.
 
 How it works: every frame it simulates ~27 candidate steering plans with the game's own physics (platforms, sliding and crumbling platforms, comets, pickups) and takes the first move of the best one. Plans score by height reached, stars and shields collected, with anything that gets it killed ruled out. Two practical rules were found by testing:
 

@@ -11,11 +11,23 @@
   h1 { margin: 0; font-size: 22px; letter-spacing: 2px; color: #ffd36b; }
   canvas { background: linear-gradient(#10143a, #1b1050 70%, #301560); border-radius: 12px; max-width: 96vw; touch-action: none; box-shadow: 0 0 40px #5b3fff55; }
   p { margin: 0; font-size: 13px; opacity: .75; }
+  #ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  #ctl button { font: 600 14px system-ui, sans-serif; color: #e8eaff; background: #241a5c; border: 1px solid #5b3fff; border-radius: 999px; padding: 8px 16px; cursor: pointer; }
+  #ctl button:hover:not(:disabled) { background: #3a2a8f; }
+  #ctl button:disabled { opacity: .35; cursor: default; }
+  #ctl button.on { background: #1d7a43; border-color: #7dff9a; }
+  #ctl .spd.sel { background: #5b3fff; }
 </style>
 </head>
 <body>
 <h1>★ STAR HOPPER ★</h1>
 <canvas id="c" width="420" height="640"></canvas>
+<div id="ctl">
+  <button id="botBtn" type="button">🤖 开启 BOT 自动玩</button>
+  <button class="spd" data-s="1" type="button">1×</button>
+  <button class="spd" data-s="4" type="button">4×</button>
+  <button class="spd" data-s="16" type="button">16×</button>
+</div>
 <p>You bounce automatically. ← → / A D or drag to steer. Grab stars (+25), dodge comets, don't fall!</p>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
@@ -76,14 +88,32 @@ function spawnRow(y) {
   if (Math.random() < .18 && y < H - 400 - camY * 0) comets.push({ x: Math.random() * W, y: y - 40, vx: (Math.random() - .5) * 2.4 });
 }
 
+// ---- bot controls: shared by the B / 1-2-3 keys and the on-page buttons ----
+const botBtn = document.getElementById('botBtn');
+const spdBtns = [...document.querySelectorAll('.spd')];
+function syncUI() {
+  botBtn.textContent = bot.on ? '🤖 BOT 运行中 · 点击关闭' : '🤖 开启 BOT 自动玩';
+  botBtn.className = bot.on ? 'on' : '';
+  for (const b of spdBtns) { b.disabled = !bot.on; b.className = 'spd' + (bot.on && +b.dataset.s === bot.speed ? ' sel' : ''); }
+}
+function toggleBot() {
+  bot.on = !bot.on; bot.waiting = false; bot.speed = 1;
+  if (bot.on && (state === 'title' || state === 'over')) reset();
+  syncUI();
+}
+function setSpeed(n) { if (bot.on) { bot.speed = n; syncUI(); } }
+botBtn.addEventListener('click', () => { toggleBot(); botBtn.blur(); });   // blur so Space doesn't re-click it
+for (const b of spdBtns) b.addEventListener('click', () => { setSpeed(+b.dataset.s); b.blur(); });
+syncUI();
+
 function startOrRestart() { if (state === 'title' || state === 'over') reset(); }
 addEventListener('keydown', e => {
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   keys[k] = true;
   if (k === ' ' || k === 'Enter') { e.preventDefault(); startOrRestart(); }
   if (k === 'm') muted = !muted;
-  if (k === 'b') { bot.on = !bot.on; bot.waiting = false; bot.speed = 1; if (bot.on && (state === 'title' || state === 'over')) reset(); }
-  if (bot.on && (k === '1' || k === '2' || k === '3')) bot.speed = [1, 4, 16][+k - 1];
+  if (k === 'b') toggleBot();
+  if (bot.on && (k === '1' || k === '2' || k === '3')) setSpeed([1, 4, 16][+k - 1]);
   if (k === 'p' && (state === 'play' || state === 'pause')) state = state === 'play' ? 'pause' : 'play';
 });
 addEventListener('keyup', e => keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false);
@@ -335,7 +365,7 @@ function draw() {
     const lines = state === 'pause' ? ['Press P to resume'] : [
       'Bounce up through the stars.',
       '', '★ Star = +25', 'Blue ring = shield (survives a comet)', 'Orange triangle = rocket boost', 'Red comets = bad news', '',
-      'Tap or press Space to start', 'Press B to watch the bot play'];
+      'Tap or press Space to start', 'Tap the 🤖 button (or press B) for autopilot'];
     lines.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 - 30 + i * 24));
     ctx.textAlign = 'left';
   }

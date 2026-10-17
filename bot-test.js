@@ -9,7 +9,7 @@ const code = html.split('<script>')[1].split('</script>')[0]
 
 const ctx = new Proxy({}, { get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => ((t[k] = v), true) });
 const cv = { width: 420, height: 640, getContext: () => ctx, addEventListener() {}, getBoundingClientRect: () => ({ left: 0, width: 420 }) };
-global.document = { getElementById: () => cv };
+global.document = { getElementById: () => cv, querySelectorAll: () => [] };
 global.addEventListener = () => {};
 global.localStorage = { getItem: () => null, setItem() {} };
 global.requestAnimationFrame = () => {};
